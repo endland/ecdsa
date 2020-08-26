@@ -1,36 +1,9 @@
-#include <stdio.h>
-#include <string.h>
-#include <unistd.h>
-#include <mbedtls/pk.h>
-#include <mbedtls/ecdsa.h>
-#include <fcntl.h>
-#include <mbedtls/entropy.h>
-#include <mbedtls/ctr_drbg.h>
-#include <mbedtls/sha256.h> 
-#include <mbedtls/ecdh.h>  
-#include <mbedtls/asn1write.h>
-#include <time.h>
+#include "ecdsa_cert.h"
 
-#define Certificate_BYTES_SIZE 800
-#define Certificate_ARRAY_SIZE 4
 
-const char passwd[] = '123456';
+const char passwd[] = "123456";
 
-typedef struct session session_t;
-struct session{
-    uint64_t id;
-  
-    struct{
-        uint8_t cert[Certificate_BYTES_SIZE]; 
-        size_t cert_len;
-        uint8_t sub_certs[Certificate_ARRAY_SIZE][Certificate_BYTES_SIZE]; 
-        size_t subcert_len[Certificate_ARRAY_SIZE]; 
-        mbedtls_ecdsa_context key;
-        mbedtls_ecdsa_context Sub2_key;  
-        mbedtls_entropy_context entropy;
-        mbedtls_ctr_drbg_context ctr_drbg;
-    } cert;
-};
+session_t s;
 
 int load_certificate_chain(const char *pemchain_path,
                             const char *keyfile_path,
@@ -72,8 +45,8 @@ int load_certificate_chain(const char *pemchain_path,
         printf("load_cert: certificate too big\n");
         return -1;
     }
-    memcpy(&s->cert.cert, crtchain.raw.p, crtchain.raw.len);
-    s->cert.cert_len = crtchain.raw.len;
+    memcpy(&s->certificate.cert, crtchain.raw.p, crtchain.raw.len);
+    s->certificate.cert_len = crtchain.raw.len;
     crt = &crtchain;
     while (crt->next != NULL) {
         if (i > Certificate_ARRAY_SIZE) {
@@ -85,13 +58,13 @@ int load_certificate_chain(const char *pemchain_path,
             printf("load_cert: subcertificate too big (max 800bytes)\n");
             return -1;
         }
-        memcpy(&s->cert.sub_certs[i], crt->raw.p, crt->raw.len);
-        s->cert.subcert_len[i] = crt->raw.len;
+        memcpy(&s->certificate.sub_certs[i], crt->raw.p, crt->raw.len);
+        s->certificate.subcert_len[i] = crt->raw.len;
 
-        err = mbedtls_base64_encode(output_buf, 4096, &olen, s->cert.sub_certs[i], s->cert.subcert_len[i]);
+        err = mbedtls_base64_encode(output_buf, 4096, &olen, s->certificate.sub_certs[i], s->certificate.subcert_len[i]);
         if (err != 0) {
             mbedtls_strerror(err, output_buf, 4096);
-            printf("load_cert, %s, %d\n", output_buf, s->cert.subcert_len[i]);
+            printf("load_cert, %s, %d\n", output_buf, s->certificate.subcert_len[i]);
             return -1;
         }
         printf("SubCA_%s\n", i ? "1" : "2");
@@ -103,7 +76,7 @@ int load_certificate_chain(const char *pemchain_path,
 
     }
     
-    err = mbedtls_x509_crt_parse(&crt_SubCA2, s->cert.sub_certs[0], s->cert.subcert_len[0]);  // SubCA2 Cert. parsing
+    err = mbedtls_x509_crt_parse(&crt_SubCA2, s->certificate.sub_certs[0], s->certificate.subcert_len[0]);  // SubCA2 Cert. parsing
     
     if (err != 0) {
         mbedtls_strerror(err, output_buf, 4096);
@@ -111,14 +84,14 @@ int load_certificate_chain(const char *pemchain_path,
         return -1;
     }
 
-    err = mbedtls_ecdsa_from_keypair(&s->cert.Sub2_key, mbedtls_pk_ec(crt_SubCA2.pk)); // setup an ECDSA context from an EC Key pair.  (Quick access to EC context inside a PK context.)
+    // extract subCA2 public key from SubCA2 certificate
+    err = mbedtls_ecdsa_from_keypair(&s->certificate.Sub2_key, mbedtls_pk_ec(crt_SubCA2.pk)); // setup an ECDSA context from an EC Key pair.  (Quick access to EC context inside a PK context.)
 
     if (err != 0) {
         mbedtls_strerror(err, output_buf, 4096);
         printf("load_cert, %s, \n", output_buf);
         return -1;
     }
-
 
     printf("load_cert : depth of cert tree, %d\n", i);
     mbedtls_x509_crt_free(&crtchain);
@@ -129,19 +102,20 @@ int load_certificate_chain(const char *pemchain_path,
     }
 
     mbedtls_ecp_keypair *kp = mbedtls_pk_ec(pk);
-    mbedtls_ecdsa_free(&s->cert.key); // Free, if existing already
-    err = mbedtls_ecdsa_from_keypair(&s->cert.key, kp);
+    mbedtls_ecdsa_free(&s->certificate.key); // Free, if existing already
+
+    err = mbedtls_ecdsa_from_keypair(&s->certificate.key, kp);    // ecdsa_context
     mbedtls_pk_free(&pk);
     if (err != 0) {
         printf("could not retrieve ecdsa from keypair at %s\n",keyfile_path);
         return -1;
     }
 
-    mbedtls_entropy_init(&s->cert.entropy);
- 
-    mbedtls_ctr_drbg_init(&s->cert.ctr_drbg); // Added by JJS (2019.02.02)
-	if ((err = mbedtls_ctr_drbg_seed(&s->cert.ctr_drbg, mbedtls_entropy_func,
-                             &s->cert.entropy,
+    printf("\nSeeding the random number generator...\n");
+    mbedtls_entropy_init(&s->certificate.entropy);
+    mbedtls_ctr_drbg_init(&s->certificate.ctr_drbg);
+	if ((err = mbedtls_ctr_drbg_seed(&s->certificate.ctr_drbg, mbedtls_entropy_func,
+                             &s->certificate.entropy,
                              (const unsigned char*)pers,
                              strlen(pers))) != 0) {
         printf("load_cert:  failed\n  ! ctr_drbg_init returned %d\n", err);
@@ -149,16 +123,73 @@ int load_certificate_chain(const char *pemchain_path,
     } 
 
     mbedtls_x509_crt_free(&crtchain);
-    mbedtls_x509_crt_free(&crt_moSubCA2);
+    mbedtls_x509_crt_free(&crt_SubCA2);
+
     return 0;
 }
 
 
 int main() {
 
-    struct session_t s;
+    int err;
 
-    if (load_certificate_chain("certs/certchain.pem", "certs_kzi/leaf.key", &s) != 0) {
+    unsigned char msg[] = "This should be hash to verify.";
+    unsigned char digest[32];
+    unsigned char sig[512];
+    size_t sig_len;
+    mbedtls_x509_crt leaf_crt;
+
+    mbedtls_ecdsa_context leaf_pub_key;
+
+    memset(digest, 0, sizeof(digest));
+    memset(sig, 0, sizeof(sig));
+
+    mbedtls_ecdsa_init(&leaf_pub_key);
+    mbedtls_x509_crt_init(&leaf_crt);
+
+    if (load_certificate_chain("certs/certchain.pem", "certs/leaf.key", &s) != 0) {  // parsing certchain and leaf private key
+        printf("faile to load certificate\n");
+        return -1;
+    }
+
+    printf(" ok (leaf private key size: %d bits)\n", (int) s.certificate.key.grp.pbits);
+    printf(" ok (subCA2 public key size: %d bits)\n", (int) s.certificate.Sub2_key.grp.pbits);
+
+    
+    mbedtls_sha256(msg, sizeof(msg), digest, 0);                                // hash message
+    
+    err = mbedtls_ecdsa_write_signature(&s.certificate.key, MBEDTLS_MD_SHA256,  // sign with leaf private key
+                                digest, 32,
+                                sig,
+                                &sig_len,
+                                mbedtls_ctr_drbg_random,
+                                &s.certificate.ctr_drbg); 
+    if (err != 0) {
+        printf("ecdsa write sig err\n");
+        return -1;
+    }
+
+    err = mbedtls_x509_crt_parse(&leaf_crt, s.certificate.cert, s.certificate.cert_len);   // parsing leaf certificate
+    if (err != 0) {
+        printf("parsing leaf certificate err\n");
+        return -1;
+    }
+
+    err = mbedtls_ecdsa_from_keypair(&leaf_pub_key, mbedtls_pk_ec(leaf_crt.pk));    // get ecdsa context type leaf public key from leaf certificate
+    if (err != 0) {
+        printf("get leaf public key err\n");
+        return -1;
+    }
+
+    err = mbedtls_ecdsa_read_signature(&leaf_pub_key, digest, 32, sig, sig_len);   // verify signature with leaf public key
+    if (err != 0) {
+            printf("invalid signature\n");
+            return -1;
+    }
+
+   
+    return 0;
+
 
 
 
